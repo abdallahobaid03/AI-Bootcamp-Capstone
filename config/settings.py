@@ -13,6 +13,7 @@ https://docs.djangoproject.com/en/4.2/ref/settings/
 from pathlib import Path
 from decouple import config
 import os
+import logging
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -166,3 +167,37 @@ if LANGSMITH_API_KEY:
     tracing_on = str(LANGSMITH_TRACING).lower() in ("1", "true", "yes", "on")
     os.environ.setdefault("LANGSMITH_TRACING", "true" if tracing_on else "false")
     os.environ.setdefault("LANGCHAIN_TRACING_V2", "true" if tracing_on else "false")
+
+#------------------------------------logging---------------------------------------------------
+LOG_DIR = BASE_DIR / "logs"
+LOG_DIR.mkdir(exist_ok=True)
+
+LOGGING = {
+    "version": 1,
+    "disable_existing_loggers": False,
+
+    "formatters": {
+        "simple": {
+            "format": "[{levelname}] {asctime} {name}: {message}",
+            "style": "{",
+        },
+    },
+
+    "handlers": {
+        "console": {
+            "class": "logging.StreamHandler",
+            "formatter": "simple",
+        },
+        "file": {
+            "class": "logging.FileHandler",
+            "filename": str(LOG_DIR / "app.log"),
+            "formatter": "simple",
+            "encoding": "utf-8",
+        },
+    },
+
+    "root": {  # كل اللوجز بالمشروع
+        "handlers": ["console", "file"],
+        "level": "INFO",
+    },
+}
