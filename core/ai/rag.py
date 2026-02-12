@@ -5,6 +5,9 @@ from langchain_pinecone import PineconeVectorStore
 from core.ai.main_llm import get_llm, get_embeddings
 from pinecone import Pinecone
 from core.ai.prompt import Prompt
+import logging
+
+logger = logging.getLogger(__name__)
 
 PROMPT = Prompt.RAG_PROMPT
 
@@ -19,8 +22,13 @@ def answer_general_question(q: str) -> str:
     if not q:
         return "اكتب سؤالك من فضلك."
 
+    logger.info("GENERAL_QA question=%s", q)
+
     docs = _vs().similarity_search(q, k=int(settings.RAG_TOP_K))
+    logger.info("RAG retrieved=%s", len(docs))
+
     if not docs:
+        logger.warning("RAG no docs for question=%s", q)
         return "ما لقيت جواب ضمن المعرفة الحالية. ممكن توضح سؤالك أكثر؟"
 
     context = "\n\n".join(d.page_content for d in docs)

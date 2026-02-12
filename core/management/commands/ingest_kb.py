@@ -14,6 +14,8 @@ try:
     from pinecone.exceptions import NotFoundException
 except Exception:
     from pinecone.exceptions.exceptions import NotFoundException
+import logging
+logger = logging.getLogger(__name__)
 
 
 SUPPORTED_EXTS = {".txt", ".md", ".pdf"}
@@ -30,6 +32,7 @@ class Command(BaseCommand):
         )
 
     def handle(self, *args, **opts):
+        
         # ---- Validate settings ----
         if not getattr(settings, "OPENAI_API_KEY", ""):
             self.stdout.write(self.style.ERROR("Missing OPENAI_API_KEY in settings/.env"))
@@ -51,7 +54,7 @@ class Command(BaseCommand):
 
         namespace = getattr(settings, "PINECONE_NAMESPACE", None) or None  # '' -> None
         topk = int(getattr(settings, "RAG_TOP_K", 4))
-
+        
         # ---- Pinecone client + index ----
         pc = Pinecone(api_key=settings.PINECONE_API_KEY)
         index = pc.Index(index_name)
@@ -68,6 +71,7 @@ class Command(BaseCommand):
                 ))
             except NotFoundException:
                 self.stdout.write(self.style.WARNING("Namespace not found — skipping reset (index empty)"))
+        logger.info("ingest_kb start reset=%s index=%s ns=%s", reset, index_name, namespace)
 
         # ---- Load docs ----
         docs = []
@@ -94,6 +98,7 @@ class Command(BaseCommand):
         # ---- Chunking (هنا المكان الصح) ----
         splitter = CharacterTextSplitter(chunk_size=700, chunk_overlap=80)
         chunks = splitter.split_documents(docs)
+        logger.info("ingest_kb chunks=%s", len(chunks))
 
         # ---- Embeddings ----
         emb_model = getattr(settings, "OPENAI_EMBEDDING_MODEL", "text-embedding-3-small")
@@ -108,3 +113,5 @@ class Command(BaseCommand):
         self.stdout.write(self.style.SUCCESS(
             f"Ingested {len(chunks)} chunks ✅ into index={index_name} namespace='{namespace or ''}' (RAG_TOP_K={topk})"
         ))
+        logger.info("ingest_kb done ✅ upserted=%s", len(chunks))
+
