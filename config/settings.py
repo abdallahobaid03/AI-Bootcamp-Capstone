@@ -168,6 +168,9 @@ if LANGSMITH_API_KEY:
     os.environ.setdefault("LANGSMITH_TRACING", "true" if tracing_on else "false")
     os.environ.setdefault("LANGCHAIN_TRACING_V2", "true" if tracing_on else "false")
 
+OPENAI_STT_MODEL = config("OPENAI_STT_MODEL")
+TWILIO_ACCOUNT_SID = config("TWILIO_ACCOUNT_SID")
+TWILIO_AUTH_TOKEN = config("TWILIO_AUTH_TOKEN")
 #------------------------------------logging---------------------------------------------------
 LOG_DIR = BASE_DIR / "logs"
 LOG_DIR.mkdir(exist_ok=True)

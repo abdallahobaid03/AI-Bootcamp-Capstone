@@ -35,15 +35,14 @@ def answer_general_question(q: str) -> str:
     msgs = PROMPT.format_messages(context=context, question=q)
     answer = get_llm().invoke(msgs).content.strip()
 
-    # مصادر مختصرة
-    sources = []
-    for d in docs:
-        src = d.metadata.get("source") or d.metadata.get("file_path") or ""
-        if src:
-            sources.append(src.split("\\")[-1].split("/")[-1])
+    # sources = []
+    # for d in docs:
+    #     src = d.metadata.get("source") or d.metadata.get("file_path") or ""
+    #     if src:
+    #         sources.append(src.split("\\")[-1].split("/")[-1])
 
-    sources = list(dict.fromkeys(sources))[:3]
-    if sources:
-        answer += "\n\nالمصادر: " + "، ".join(sources)
+    # sources = list(dict.fromkeys(sources))[:3]
+    # if sources:
+    #     answer += "\n\nالمصادر: " + "، ".join(sources)
 
     return answer

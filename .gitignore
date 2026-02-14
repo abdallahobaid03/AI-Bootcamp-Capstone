@@ -9,3 +9,8 @@ wheels/
 # Virtual environments
 .venv
 .env
+requirements.lock.txt
+
+# ignore logs, but keep the folder
+logs/*
+!logs/.gitkeep
