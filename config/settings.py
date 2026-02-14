@@ -171,6 +171,11 @@ if LANGSMITH_API_KEY:
 OPENAI_STT_MODEL = config("OPENAI_STT_MODEL")
 TWILIO_ACCOUNT_SID = config("TWILIO_ACCOUNT_SID")
 TWILIO_AUTH_TOKEN = config("TWILIO_AUTH_TOKEN")
+
+# Email Config
+RECEIVED_EMAIL = config("RECEIVED_EMAIL")
+GMAIL_TOKEN_FILE = config("GMAIL_TOKEN_FILE", "token.json")
+GMAIL_CREDENTIALS_FILE = config("GMAIL_CREDENTIALS_FILE", "credentials.json")
 #------------------------------------logging---------------------------------------------------
 LOG_DIR = BASE_DIR / "logs"
 LOG_DIR.mkdir(exist_ok=True)
@@ -199,7 +204,7 @@ LOGGING = {
         },
     },
 
-    "root": {  # كل اللوجز بالمشروع
+    "root": {
         "handlers": ["console", "file"],
         "level": "INFO",
     },

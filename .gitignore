@@ -14,3 +14,9 @@ requirements.lock.txt
 # ignore logs, but keep the folder
 logs/*
 !logs/.gitkeep
+
+# ignore token and credentials
+credentials.json
+token.json
+client_secret*.json
+generate_gmail_token.py
