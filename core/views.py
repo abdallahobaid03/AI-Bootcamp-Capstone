@@ -13,6 +13,10 @@ from xml.sax.saxutils import escape
 from rest_framework.response import Response
 from core.ai.router import route_message
 from core.ai.rag import answer_general_question
+import logging
+from core.ai.stt import is_voice_message, transcribe_twilio_voice
+
+logger = logging.getLogger(__name__)
 
 def is_twilio_request(request) -> bool:
     # Twilio بيبعت هذا الهيدر دايمًا
@@ -148,6 +152,31 @@ class WhatsAppWebhook(APIView):
     def post(self, request):
         body = normalize(request.data.get("Body"))
         from_number = normalize(request.data.get("From"))
+        
+        payload = request.data
+
+        from_number = normalize(payload.get("From"))
+
+        raw_text = (payload.get("Body") or "").strip()
+        stt_text = None
+        message_type = "text"
+
+        if is_voice_message(payload):
+            try:
+                stt_text = transcribe_twilio_voice(payload)
+                raw_text = stt_text or ""
+                message_type = "voice"
+            except Exception:
+                reply = "تفضل كيف بقدر أخدمك؟\nما قدرت أفهم الصوت. جرّب تبعثه مرة ثانية أو اكتبها نص."
+                return build_response(request, reply)
+
+        body = normalize(raw_text)
+
+        if not from_number:
+            return build_response(request, "Missing From", http_status=400)
+
+        session, _ = ConversationSession.objects.get_or_create(user_key=from_number)
+        logger.info("inbound from=%s state=%s type=%s body=%s", from_number, session.state, message_type, body[:200])
 
         if not from_number:
             return build_response(request, "Missing From", http_status=400)
@@ -155,12 +184,14 @@ class WhatsAppWebhook(APIView):
         session, _ = ConversationSession.objects.get_or_create(user_key=from_number)
 
         # سجّل inbound
-        ChatMessage.objects.create(session=session, direction="in", message_type="text", text=body)
+        ChatMessage.objects.create(session=session, direction="Customer", message_type="text", text=body)
+
+        logger.info("inbound from=%s state=%s body=%s", from_number, session.state, body[:200])
 
         # 0) رجوع للقائمة من أي مكان
         if body.lower() in {"0", "menu", "start", "القائمة", "قائمة"}:
             reset_to_menu(session)
-            ChatMessage.objects.create(session=session, direction="out", message_type="text", text=MENU_TEXT)
+            ChatMessage.objects.create(session=session, direction="System", message_type="text", text=MENU_TEXT)
             return build_response(request, MENU_TEXT)
 
         # =============== STATES ===============
@@ -308,5 +339,5 @@ class WhatsAppWebhook(APIView):
             reply = MENU_TEXT
 
         # سجّل outbound
-        ChatMessage.objects.create(session=session, direction="out", message_type="text", text=reply)
+        ChatMessage.objects.create(session=session, direction="System", message_type="text", text=reply)
         return build_response(request, reply)
