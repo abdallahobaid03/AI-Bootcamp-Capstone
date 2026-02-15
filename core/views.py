@@ -16,6 +16,7 @@ from core.ai.rag import answer_general_question
 import logging
 from core.ai.stt import is_voice_message, transcribe_twilio_voice
 from core.ai.complaint_email import send_complaint_to_staff
+import re
 
 logger = logging.getLogger(__name__)
 
@@ -48,7 +49,7 @@ MENU_TEXT = (
 )
 
 ASK_NAME = "تمام. للتأكد من هويتك: اكتب اسمك الأول."
-ASK_LAST4 = "حلو. الآن اكتب آخر 4 أرقام من رقم العداد."
+ASK_LAST4 = "الآن اكتب آخر 4 أرقام من رقم العداد."
 VERIFY_SUCCESS = "تم التحقق ✅"
 VERIFY_FAIL = "البيانات غير صحيحة ❌ حاول مرة ثانية."
 
@@ -59,6 +60,16 @@ GENERAL_HELP = (
     "- ساعات الدعم\n"
     "اكتب سؤالك (أو 0 للرجوع للقائمة)."
 )
+
+def normalize_phone(v: str) -> str:
+    v = (v or "").strip()
+    v = re.sub(r"[^\d+]", "", v)
+    return v
+
+def is_valid_phone(v: str) -> bool:
+    v = normalize_phone(v)
+    digits = re.sub(r"\D", "", v)
+    return 9 <= len(digits) <= 13
 
 
 def normalize(value) -> str:
@@ -96,18 +107,14 @@ def handle_intent(session: ConversationSession, user_key: str) -> str:
         return "ما لقيت حساب مرتبط بهذا الرقم.\n\n" + MENU_TEXT
 
     if intent == "2":
-        rec = ConsumptionRecord.objects.filter(customer=customer).order_by("-created_at", "-id").first()
-        if not rec:
-            reset_to_menu(session)
-            return "ما في بيانات استهلاك لهذا الرقم حالياً.\n\n" + MENU_TEXT
+        session.state = "CONSUMPTION_QA"
+        session.save(update_fields=["state"])
+        return (
+        "تمام ✅ اسألني عن استهلاكك بشكل طبيعي.\n"
+        "مثال: كم استهلاكي هالشهر؟ أو قارنلي بين آخر شهرين.\n"
+        "اكتب 0 للرجوع للقائمة."
+    )
 
-        reply = (
-            f"استهلاكك ({rec.period_label}): {rec.kwh} kWh\n"
-            f"التوفير: {rec.saving_percent}%\n\n"
-            + MENU_TEXT
-        )
-        reset_to_menu(session)
-        return reply
 
     if intent == "3":
         session.state = "EDIT_CHOOSE"
@@ -269,23 +276,72 @@ class WhatsAppWebhook(APIView):
         elif session.state == "AFTER_VERIFY":
             reply = handle_intent(session, from_number)
 
+        elif session.state == "CONSUMPTION_QA":
+            if body.strip() == "0":
+                reset_to_menu(session)
+                reply = MENU_TEXT
+            else:
+                from core.ai.consumption_agent import answer_consumption_agentic
+                reply = answer_consumption_agentic(user_key=from_number, message=body)
+                reply = f"{reply}\n\nاكتب سؤال ثاني عن الاستهلاك، أو 0 للرجوع للقائمة."
+
+
         elif session.state == "EDIT_CHOOSE":
-            if body == "1":
+            if body == "0":
+                reset_to_menu(session)
+                reply = MENU_TEXT
+
+            elif body == "1":
                 session.state = "EDIT_PHONE"
                 session.save(update_fields=["state"])
                 reply = "اكتب رقم الهاتف الجديد (أو 0 للرجوع للقائمة)."
+
             elif body == "2":
                 session.state = "EDIT_ADDRESS"
                 session.save(update_fields=["state"])
                 reply = "اكتب العنوان الجديد (أو 0 للرجوع للقائمة)."
+
             else:
-                reply = "اختيار غير صحيح.\nاكتب 1 للهاتف أو 2 للعنوان أو 0 للقائمة."
+                from core.ai.edit_router import extract_edit_request
+                decision = extract_edit_request(body)
+                field = (decision.get("field") or "unknown").strip().lower()
+                value = (decision.get("value") or "").strip()
+
+                customer = get_customer(from_number)
+                if not customer:
+                    reset_to_menu(session)
+                    reply = "ما لقيت حساب مرتبط بهذا الرقم.\n\n" + MENU_TEXT
+
+                elif field == "phone":
+                    if not value or not is_valid_phone(value):
+                        session.state = "EDIT_PHONE"
+                        session.save(update_fields=["state"])
+                        reply = "تمام. اكتب رقم الهاتف الجديد بشكل صحيح (مثال: 079xxxxxxx) أو 0 للقائمة."
+                    else:
+                        customer.phone = normalize_phone(value)
+                        customer.save(update_fields=["phone"])
+                        reset_to_menu(session)
+                        reply = "تم تحديث رقم الهاتف ✅\n\n" + MENU_TEXT
+
+                elif field == "address":
+                    if not value:
+                        session.state = "EDIT_ADDRESS"
+                        session.save(update_fields=["state"])
+                        reply = "تمام. اكتب العنوان الجديد (أو 0 للرجوع للقائمة)."
+                    else:
+                        customer.address = value
+                        customer.save(update_fields=["address"])
+                        reset_to_menu(session)
+                        reply = "تم تحديث العنوان ✅\n\n" + MENU_TEXT
+
+                else:
+                    reply = "بدك تعدّل شو بالضبط؟\n1 لتعديل الهاتف\n2 لتعديل العنوان\n0 للقائمة"
+
 
         elif session.state == "EDIT_PHONE":
-            customer = get_customer(from_number)
-            if not customer:
+            if body == "0":
                 reset_to_menu(session)
-                reply = "ما لقيت حساب مرتبط بهذا الرقم.\n\n" + MENU_TEXT
+                reply = MENU_TEXT
             else:
                 customer.phone = body
                 customer.save(update_fields=["phone"])
