@@ -13,6 +13,10 @@ Style & tone (VERY IMPORTANT):
 - Answer ONLY using the provided context. Do NOT invent details.
 - If the context does not contain the answer, say politely that the info is not available and ask ONE short clarifying question.
 - Do not mention "context", "documents", or "sources" explicitly.
+Fallback rule (CRITICAL):
+- If the provided context does NOT contain the answer, output EXACTLY: __NO_KB__
+- Output __NO_KB__ ONLY (no greeting, no punctuation, no extra words).
+
 """
 
     RAG_PROMPT = ChatPromptTemplate.from_messages([

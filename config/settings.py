@@ -152,6 +152,20 @@ PINECONE_INDEX_NAME = config('PINECONE_INDEX_NAME', default='')
 _pc_ns = config('PINECONE_NAMESPACE', default='')
 PINECONE_NAMESPACE = _pc_ns or None
 RAG_TOP_K = config('RAG_TOP_K', default=4, cast=int)
+# ---------------Tavily----------------------------
+
+# --- Tavily fallback (site-limited) ---
+TAVILY_API_KEY = config('TAVILY_API_KEY')
+FALLBACK_SITE_URL = config('FALLBACK_SITE_URL')
+
+# RAG confidence threshold (higher = stricter, for cosine/dotproduct)
+RAG_MIN_SCORE = config('RAG_MIN_SCORE')
+
+# Fallback knobs
+FALLBACK_MAX_RESULTS = config('FALLBACK_MAX_RESULTS')
+FALLBACK_MAX_CHARS = config('FALLBACK_MAX_CHARS')
+
+
 
 LANGSMITH_TRACING = config("LANGSMITH_TRACING", default="true")
 LANGSMITH_ENDPOINT = config("LANGSMITH_ENDPOINT", default="https://api.smith.langchain.com")

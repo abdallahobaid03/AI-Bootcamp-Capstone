@@ -10,4 +10,5 @@ dependencies = [
     "google-auth-oauthlib>=1.2.4",
     "langchain-google-community>=3.0.5",
     "langchain-pinecone>=0.2.13",
+    "langchain-tavily>=0.2.17",
 ]
