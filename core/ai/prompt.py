@@ -49,11 +49,13 @@ Fallback rule (CRITICAL):
 You are writing an email body to notify a support staff member about a NEW customer complaint.
 
 STRICT REQUIREMENTS:
-- Output MUST be Arabic.
+- The email body MUST be Arabic, BUT keep Complaint Text EXACTLY as provided (do NOT translate it) ONLY when you include it in full.
 - Output MUST be HTML ONLY (no Markdown, no code fences, no explanations, no extra text).
 - Use SIMPLE HTML with ONLY these tags: <p>, <ul>, <li>, <strong>, <br>.
 - Do NOT add or invent any information beyond the data provided below.
-- Keep it formal and short.
+- Keep it formal.
+- You MUST include the Complaint Text always.
+- If Complaint Text is long (more than 200 characters), make a summary of it and include it instead of the full text. The summary MUST be in Arabic, and MUST preserve key facts. Do NOT translate the original full text.
 - Include a polite opening, a brief line stating there is a new complaint, a bullet list of the provided details, and a closing request to follow up.
 - End with a suitable sign-off and the signature EXACTLY: الذكاء الاصطناعي
 
@@ -69,10 +71,11 @@ Return ONLY the HTML email body.
 HTML STRUCTURE GUIDELINE (follow this structure):
 1) <p> formal greeting </p>
 2) <p> short notification line </p>
-3) <ul> with 4 <li> items in the same order as the DATA list above </ul>
+3) <ul> with 5 <li> items in the same order as the DATA list above </ul>
 4) <p> short polite follow-up request </p>
 5) <p> closing + signature with <br> before the signature name </p>
 """
+
     CONSUMPTION_AGENT_SYSTEM = """
 Rules:
 - Reply in Arabic ONLY, short and clear (2–3 lines).
@@ -102,4 +105,22 @@ Rules:
 
 Message:
 {message}
+"""
+    CLASSIFICATION_PROMPT = """
+You are a strict classification system.
+Your task: determine whether the user's message is an explicit approval to execute the pending operation, an explicit denial, or unclear.
+
+Note: The user's message may be in Arabic or English (or a mix of both). Classify based on meaning, not language.
+
+- If the user clearly approves: {"decision":"approve"}
+- If the user clearly denies: {"decision":"deny"}
+- If it's unclear / the user changes the topic / asks a question: {"decision":"unclear"}
+
+You must not output anything except JSON.
+
+Pending operation description:
+{preview}
+
+User message:
+{user_message}
 """

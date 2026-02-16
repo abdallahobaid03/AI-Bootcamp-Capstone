@@ -5,7 +5,7 @@ from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework import status
 from rest_framework.parsers import JSONParser, FormParser, MultiPartParser
-
+from core.ai.confirm_action import classify_confirmation
 from core.models import ConversationSession, ChatMessage
 from core.models import Customer, ConsumptionRecord, Complaint
 from django.http import HttpResponse
@@ -87,7 +87,16 @@ def reset_to_menu(session: ConversationSession):
     session.pending_intent = ""
     session.verify_first_name = ""
     session.verify_meter_last4 = ""
-    session.save(update_fields=["state", "pending_intent", "verify_first_name", "verify_meter_last4"])
+
+    session.pending_action_type = ""
+    session.pending_action_params = {}
+    session.pending_action_preview = ""
+    session.pending_action_expires_at = None
+
+    session.save(update_fields=[
+        "state", "pending_intent", "verify_first_name", "verify_meter_last4",
+        "pending_action_type", "pending_action_params", "pending_action_preview", "pending_action_expires_at"
+    ])
 
 
 def get_customer(user_key: str):
@@ -138,6 +147,61 @@ def handle_intent(session: ConversationSession, user_key: str) -> str:
     reset_to_menu(session)
     return MENU_TEXT
 
+def stage_pending_action(session: ConversationSession, action_type: str, params: dict, preview: str) -> str:
+    session.state = "CONFIRM_ACTION"
+    session.pending_action_type = action_type
+    session.pending_action_params = params or {}
+    session.pending_action_preview = preview
+    session.pending_action_expires_at = timezone.now() + timedelta(minutes=10)
+    session.save(update_fields=[
+        "state", "pending_action_type", "pending_action_params",
+        "pending_action_preview", "pending_action_expires_at"
+    ])
+    return f"{preview}\n\nهل أكمّل؟ (جاوب بأي طريقة، وأنا بفهم موافقة/رفض)"
+
+def clear_pending_action(session: ConversationSession):
+    session.pending_action_type = ""
+    session.pending_action_params = {}
+    session.pending_action_preview = ""
+    session.pending_action_expires_at = None
+    session.save(update_fields=[
+        "pending_action_type", "pending_action_params",
+        "pending_action_preview", "pending_action_expires_at"
+    ])
+
+def run_pending_action(user_key: str, session: ConversationSession) -> str:
+    customer = get_customer(user_key)
+    if not customer:
+        return "ما لقيت حساب مرتبط بهذا الرقم."
+
+    action = session.pending_action_type
+    params = session.pending_action_params or {}
+
+    if action == "update_phone":
+        new_phone = params.get("new_phone", "")
+        if not new_phone or not is_valid_phone(new_phone):
+            return "رقم الهاتف الجديد غير صحيح."
+        customer.phone = normalize_phone(new_phone)
+        customer.save(update_fields=["phone"])
+        return "تم تحديث رقم الهاتف ✅"
+
+    if action == "update_address":
+        new_address = (params.get("new_address") or "").strip()
+        if not new_address:
+            return "العنوان الجديد فاضي."
+        customer.address = new_address
+        customer.save(update_fields=["address"])
+        return "تم تحديث العنوان ✅"
+
+    if action == "send_complaint_email":
+        cid = params.get("complaint_id")
+        comp = Complaint.objects.filter(id=cid, customer=customer).first()
+        if not comp:
+            return "ما لقيت الشكوى المطلوبة."
+        send_complaint_to_staff(customer, comp)
+        return f"تم إرسال الشكوى رقم {comp.id} للدعم ✅"
+
+    return "عملية غير معروفة."
 
 class WhatsAppWebhook(APIView):
     authentication_classes = []
@@ -187,6 +251,34 @@ class WhatsAppWebhook(APIView):
         ChatMessage.objects.create(session=session, direction="Customer", message_type="text", text=body)
 
         logger.info("inbound from=%s state=%s body=%s", from_number, session.state, body[:200])
+        if session.state == "CONFIRM_ACTION":
+            if session.pending_action_expires_at and timezone.now() > session.pending_action_expires_at:
+                clear_pending_action(session)
+                reset_to_menu(session)
+                reply = "انتهت مدة التأكيد. ابعت الطلب مرة ثانية.\n\n" + MENU_TEXT
+                ChatMessage.objects.create(session=session, direction="System", message_type="text", text=reply)
+                return build_response(request, reply)
+
+            decision = classify_confirmation(session.pending_action_preview, body)
+
+            if decision == "deny":
+                clear_pending_action(session)
+                reset_to_menu(session)
+                reply = "تمام، ألغيت العملية ✅\n\n" + MENU_TEXT
+                ChatMessage.objects.create(session=session, direction="System", message_type="text", text=reply)
+                return build_response(request, reply)
+
+            if decision == "approve":
+                msg = run_pending_action(from_number, session)
+                clear_pending_action(session)
+                reset_to_menu(session)
+                reply = f"{msg}\n\n{MENU_TEXT}"
+                ChatMessage.objects.create(session=session, direction="System", message_type="text", text=reply)
+                return build_response(request, reply)
+
+            reply = f"{session.pending_action_preview}\n\nمش واضح إذا موافق أو رافض.\nبدك أنفّذ ولا لأ؟"
+            ChatMessage.objects.create(session=session, direction="System", message_type="text", text=reply)
+            return build_response(request, reply)
 
         if body.lower() in {"0", "menu", "start", "القائمة", "قائمة"}:
             reset_to_menu(session)
@@ -318,10 +410,13 @@ class WhatsAppWebhook(APIView):
                         session.save(update_fields=["state"])
                         reply = "تمام. اكتب رقم الهاتف الجديد بشكل صحيح (مثال: 079xxxxxxx) أو 0 للقائمة."
                     else:
-                        customer.phone = normalize_phone(value)
-                        customer.save(update_fields=["phone"])
-                        reset_to_menu(session)
-                        reply = "تم تحديث رقم الهاتف ✅\n\n" + MENU_TEXT
+                        normalized = normalize_phone(value)
+                        reply = stage_pending_action(
+                            session,
+                            action_type="update_phone",
+                            params={"new_phone": normalized},
+                            preview=f"رح أغيّر رقم هاتفك إلى: {normalized}"
+                        )
 
                 elif field == "address":
                     if not value:
@@ -329,10 +424,13 @@ class WhatsAppWebhook(APIView):
                         session.save(update_fields=["state"])
                         reply = "تمام. اكتب العنوان الجديد (أو 0 للرجوع للقائمة)."
                     else:
-                        customer.address = value
-                        customer.save(update_fields=["address"])
-                        reset_to_menu(session)
-                        reply = "تم تحديث العنوان ✅\n\n" + MENU_TEXT
+                        new_addr = value.strip()
+                        reply = stage_pending_action(
+                            session,
+                            action_type="update_address",
+                            params={"new_address": new_addr},
+                            preview=f"رح أغيّر عنوانك إلى:\n{new_addr}"
+                        )
 
                 else:
                     reply = "بدك تعدّل شو بالضبط؟\n1 لتعديل الهاتف\n2 لتعديل العنوان\n0 للقائمة"
@@ -343,38 +441,61 @@ class WhatsAppWebhook(APIView):
                 reset_to_menu(session)
                 reply = MENU_TEXT
             else:
-                customer.phone = body
-                customer.save(update_fields=["phone"])
-                reset_to_menu(session)
-                reply = "تم تحديث رقم الهاتف ✅\n\n" + MENU_TEXT
+                customer = get_customer(from_number)
+                if not customer:
+                    reset_to_menu(session)
+                    reply = "ما لقيت حساب مرتبط بهذا الرقم.\n\n" + MENU_TEXT
+                elif not is_valid_phone(body):
+                    reply = "رقم غير صحيح. اكتب رقم هاتف صحيح (مثال: 079xxxxxxx) أو 0 للقائمة."
+                else:
+                    normalized = normalize_phone(body)
+                    reply = stage_pending_action(
+                        session,
+                        action_type="update_phone",
+                        params={"new_phone": normalized},
+                        preview=f"رح أغيّر رقم هاتفك إلى: {normalized}"
+                    )
+
 
         elif session.state == "EDIT_ADDRESS":
-            customer = get_customer(from_number)
-            if not customer:
+            if body == "0":
                 reset_to_menu(session)
-                reply = "ما لقيت حساب مرتبط بهذا الرقم.\n\n" + MENU_TEXT
+                reply = MENU_TEXT
             else:
-                customer.address = body
-                customer.save(update_fields=["address"])
-                reset_to_menu(session)
-                reply = "تم تحديث العنوان ✅\n\n" + MENU_TEXT
+                customer = get_customer(from_number)
+                if not customer:
+                    reset_to_menu(session)
+                    reply = "ما لقيت حساب مرتبط بهذا الرقم.\n\n" + MENU_TEXT
+                else:
+                    new_addr = body.strip()
+                    if not new_addr:
+                        reply = "العنوان فاضي. اكتب العنوان الجديد أو 0 للقائمة."
+                    else:
+                        reply = stage_pending_action(
+                            session,
+                            action_type="update_address",
+                            params={"new_address": new_addr},
+                            preview=f"رح أغيّر عنوانك إلى:\n{new_addr}"
+                        )
 
         elif session.state == "COMPLAINT_TEXT":
-            customer = get_customer(from_number)
-            if not customer:
+            if body == "0":
                 reset_to_menu(session)
-                reply = "ما لقيت حساب مرتبط بهذا الرقم.\n\n" + MENU_TEXT
+                reply = MENU_TEXT
             else:
-                comp = Complaint.objects.create(customer=customer, text=body, status="OPEN")
+                customer = get_customer(from_number)
+                if not customer:
+                    reset_to_menu(session)
+                    reply = "ما لقيت حساب مرتبط بهذا الرقم.\n\n" + MENU_TEXT
+                else:
+                    comp = Complaint.objects.create(customer=customer, text=body, status="OPEN")
 
-                try:
-                    email_res = send_complaint_to_staff(customer, comp)
-                    logger.info("complaint email sent complaint_id=%s result=%s", comp.id, email_res)
-                except Exception as e:
-                    logger.exception("complaint email failed complaint_id=%s err=%s", comp.id, e)
-
-                reset_to_menu(session)
-                reply = f"نأسف لسماع هذا \nتم تسجيل الشكوى ✅ رقمها: {comp.id}\n\n" + MENU_TEXT
+                    reply = stage_pending_action(
+                        session,
+                        action_type="send_complaint_email",
+                        params={"complaint_id": comp.id},
+                        preview=f"تم تسجيل الشكوى ✅ رقمها: {comp.id}\nرح أرسلها للدعم بالإيميل الآن."
+                    )
 
 
         elif session.state == "GENERAL_QA":

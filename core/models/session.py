@@ -10,6 +10,11 @@ class ConversationSession(models.Model):
     attempts = models.IntegerField(default=0)
     verified_until = models.DateTimeField(null=True, blank=True)
 
+    pending_action_type = models.CharField(max_length=64, blank=True, default="")
+    pending_action_params = models.JSONField(default=dict, blank=True)
+    pending_action_preview = models.TextField(blank=True, default="")
+    pending_action_expires_at = models.DateTimeField(null=True, blank=True)
+
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 

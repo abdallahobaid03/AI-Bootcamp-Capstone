@@ -22,7 +22,7 @@ def build_complaint_email_html(customer, complaint):
     )
 
     html = llm.invoke(prompt).content
-    subject = f"شكوى جديدة #{complaint.id} - {customer.first_name}"
+    subject = f"New Complaint From #{complaint.id} - {customer.first_name}"
     return subject, html
 
 
