@@ -1,4 +1,4 @@
-# AI Bootcamp Capstone — WhatsApp Renewable‑Energy Support Agent
+# Pulse — WhatsApp Renewable‑Energy Support Agent
 
 A WhatsApp customer-support assistant for a renewable energy company in Jordan.
 
