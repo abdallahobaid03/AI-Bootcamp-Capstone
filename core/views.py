@@ -13,9 +13,14 @@ from xml.sax.saxutils import escape
 from rest_framework.response import Response
 from core.ai.router import route_message
 from core.ai.rag import answer_general_question
+import logging
+from core.ai.stt import is_voice_message, transcribe_twilio_voice
+from core.ai.complaint_email import send_complaint_to_staff
+import re
+
+logger = logging.getLogger(__name__)
 
 def is_twilio_request(request) -> bool:
-    # Twilio بيبعت هذا الهيدر دايمًا
     return bool(request.META.get("HTTP_X_TWILIO_SIGNATURE"))
 
 def twiml_message(text: str) -> str:
@@ -23,7 +28,6 @@ def twiml_message(text: str) -> str:
     return f'<?xml version="1.0" encoding="UTF-8"?><Response><Message>{safe}</Message></Response>'
 
 def build_response(request, reply: str, http_status: int = 200):
-    # لو الطلب جاي من Twilio -> لازم XML
     if is_twilio_request(request):
         return HttpResponse(
             twiml_message(reply),
@@ -31,7 +35,6 @@ def build_response(request, reply: str, http_status: int = 200):
             status=http_status
         )
 
-    # غير هيك (DRF / Postman / اختبارك) -> JSON
     return Response({"reply": reply}, status=http_status)
 
 
@@ -46,7 +49,7 @@ MENU_TEXT = (
 )
 
 ASK_NAME = "تمام. للتأكد من هويتك: اكتب اسمك الأول."
-ASK_LAST4 = "حلو. الآن اكتب آخر 4 أرقام من رقم العداد."
+ASK_LAST4 = "الآن اكتب آخر 4 أرقام من رقم العداد."
 VERIFY_SUCCESS = "تم التحقق ✅"
 VERIFY_FAIL = "البيانات غير صحيحة ❌ حاول مرة ثانية."
 
@@ -57,6 +60,16 @@ GENERAL_HELP = (
     "- ساعات الدعم\n"
     "اكتب سؤالك (أو 0 للرجوع للقائمة)."
 )
+
+def normalize_phone(v: str) -> str:
+    v = (v or "").strip()
+    v = re.sub(r"[^\d+]", "", v)
+    return v
+
+def is_valid_phone(v: str) -> bool:
+    v = normalize_phone(v)
+    digits = re.sub(r"\D", "", v)
+    return 9 <= len(digits) <= 13
 
 
 def normalize(value) -> str:
@@ -93,22 +106,16 @@ def handle_intent(session: ConversationSession, user_key: str) -> str:
         reset_to_menu(session)
         return "ما لقيت حساب مرتبط بهذا الرقم.\n\n" + MENU_TEXT
 
-    # 2) استهلاك
     if intent == "2":
-        rec = ConsumptionRecord.objects.filter(customer=customer).order_by("-created_at", "-id").first()
-        if not rec:
-            reset_to_menu(session)
-            return "ما في بيانات استهلاك لهذا الرقم حالياً.\n\n" + MENU_TEXT
+        session.state = "CONSUMPTION_QA"
+        session.save(update_fields=["state"])
+        return (
+        "تمام ✅ اسألني عن استهلاكك بشكل طبيعي.\n"
+        "مثال: كم استهلاكي هالشهر؟ أو قارنلي بين آخر شهرين.\n"
+        "اكتب 0 للرجوع للقائمة."
+    )
 
-        reply = (
-            f"استهلاكك ({rec.period_label}): {rec.kwh} kWh\n"
-            f"التوفير: {rec.saving_percent}%\n\n"
-            + MENU_TEXT
-        )
-        reset_to_menu(session)
-        return reply
 
-    # 3) تعديل بيانات
     if intent == "3":
         session.state = "EDIT_CHOOSE"
         session.save(update_fields=["state"])
@@ -123,13 +130,11 @@ def handle_intent(session: ConversationSession, user_key: str) -> str:
             "0 للرجوع للقائمة"
         )
 
-    # 4) شكوى
     if intent == "4":
         session.state = "COMPLAINT_TEXT"
         session.save(update_fields=["state"])
         return "تمام، اكتب الشكوى الآن (أو 0 للرجوع للقائمة)."
 
-    # fallback
     reset_to_menu(session)
     return MENU_TEXT
 
@@ -137,7 +142,7 @@ def handle_intent(session: ConversationSession, user_key: str) -> str:
 class WhatsAppWebhook(APIView):
     authentication_classes = []
     permission_classes = []
-    parser_classes = [JSONParser, FormParser, MultiPartParser]  # Twilio form-data + JSON
+    parser_classes = [JSONParser, FormParser, MultiPartParser]
 
     def get(self, request):
         return Response({
@@ -148,33 +153,53 @@ class WhatsAppWebhook(APIView):
     def post(self, request):
         body = normalize(request.data.get("Body"))
         from_number = normalize(request.data.get("From"))
+        
+        payload = request.data
+
+        from_number = normalize(payload.get("From"))
+
+        raw_text = (payload.get("Body") or "").strip()
+        stt_text = None
+        message_type = "text"
+
+        if is_voice_message(payload):
+            try:
+                stt_text = transcribe_twilio_voice(payload)
+                raw_text = stt_text or ""
+                message_type = "voice"
+            except Exception:
+                reply = "تفضل كيف بقدر أخدمك؟\nما قدرت أفهم الصوت. جرّب تبعثه مرة ثانية أو اكتبها نص."
+                return build_response(request, reply)
+
+        body = normalize(raw_text)
+
+        if not from_number:
+            return build_response(request, "Missing From", http_status=400)
+
+        session, _ = ConversationSession.objects.get_or_create(user_key=from_number)
+        logger.info("inbound from=%s state=%s type=%s body=%s", from_number, session.state, message_type, body[:200])
 
         if not from_number:
             return build_response(request, "Missing From", http_status=400)
 
         session, _ = ConversationSession.objects.get_or_create(user_key=from_number)
 
-        # سجّل inbound
-        ChatMessage.objects.create(session=session, direction="in", message_type="text", text=body)
+        ChatMessage.objects.create(session=session, direction="Customer", message_type="text", text=body)
 
-        # 0) رجوع للقائمة من أي مكان
+        logger.info("inbound from=%s state=%s body=%s", from_number, session.state, body[:200])
+
         if body.lower() in {"0", "menu", "start", "القائمة", "قائمة"}:
             reset_to_menu(session)
-            ChatMessage.objects.create(session=session, direction="out", message_type="text", text=MENU_TEXT)
+            ChatMessage.objects.create(session=session, direction="System", message_type="text", text=MENU_TEXT)
             return build_response(request, MENU_TEXT)
 
-        # =============== STATES ===============
-
         if session.state == "WAIT_MENU":
-            # لو كتب رقم مباشر
             if body in {"1", "2", "3", "4"}:
                 mapped = body
             else:
-                # نص حر → خلّي الراوتر يقرر
                 routed = route_message(body)
-                mapped = routed.mapped_option  # "0/1/2/3/4"
+                mapped = routed.mapped_option
 
-            # طبّق الـ mapped
             if mapped == "0":
                 reply = MENU_TEXT
 
@@ -246,30 +271,77 @@ class WhatsAppWebhook(APIView):
                 session.state = "AFTER_VERIFY"
                 session.save(update_fields=["verified_until", "state"])
 
-                # ✅ نفّذ الطلب مباشرة
                 reply = VERIFY_SUCCESS + "\n\n" + handle_intent(session, from_number)
 
         elif session.state == "AFTER_VERIFY":
-            # احتياط لو وصلنا هون لأي سبب
             reply = handle_intent(session, from_number)
 
+        elif session.state == "CONSUMPTION_QA":
+            if body.strip() == "0":
+                reset_to_menu(session)
+                reply = MENU_TEXT
+            else:
+                from core.ai.consumption_agent import answer_consumption_agentic
+                reply = answer_consumption_agentic(user_key=from_number, message=body)
+                reply = f"{reply}\n\nاكتب سؤال ثاني عن الاستهلاك، أو 0 للرجوع للقائمة."
+
+
         elif session.state == "EDIT_CHOOSE":
-            if body == "1":
+            if body == "0":
+                reset_to_menu(session)
+                reply = MENU_TEXT
+
+            elif body == "1":
                 session.state = "EDIT_PHONE"
                 session.save(update_fields=["state"])
                 reply = "اكتب رقم الهاتف الجديد (أو 0 للرجوع للقائمة)."
+
             elif body == "2":
                 session.state = "EDIT_ADDRESS"
                 session.save(update_fields=["state"])
                 reply = "اكتب العنوان الجديد (أو 0 للرجوع للقائمة)."
+
             else:
-                reply = "اختيار غير صحيح.\nاكتب 1 للهاتف أو 2 للعنوان أو 0 للقائمة."
+                from core.ai.edit_router import extract_edit_request
+                decision = extract_edit_request(body)
+                field = (decision.get("field") or "unknown").strip().lower()
+                value = (decision.get("value") or "").strip()
+
+                customer = get_customer(from_number)
+                if not customer:
+                    reset_to_menu(session)
+                    reply = "ما لقيت حساب مرتبط بهذا الرقم.\n\n" + MENU_TEXT
+
+                elif field == "phone":
+                    if not value or not is_valid_phone(value):
+                        session.state = "EDIT_PHONE"
+                        session.save(update_fields=["state"])
+                        reply = "تمام. اكتب رقم الهاتف الجديد بشكل صحيح (مثال: 079xxxxxxx) أو 0 للقائمة."
+                    else:
+                        customer.phone = normalize_phone(value)
+                        customer.save(update_fields=["phone"])
+                        reset_to_menu(session)
+                        reply = "تم تحديث رقم الهاتف ✅\n\n" + MENU_TEXT
+
+                elif field == "address":
+                    if not value:
+                        session.state = "EDIT_ADDRESS"
+                        session.save(update_fields=["state"])
+                        reply = "تمام. اكتب العنوان الجديد (أو 0 للرجوع للقائمة)."
+                    else:
+                        customer.address = value
+                        customer.save(update_fields=["address"])
+                        reset_to_menu(session)
+                        reply = "تم تحديث العنوان ✅\n\n" + MENU_TEXT
+
+                else:
+                    reply = "بدك تعدّل شو بالضبط؟\n1 لتعديل الهاتف\n2 لتعديل العنوان\n0 للقائمة"
+
 
         elif session.state == "EDIT_PHONE":
-            customer = get_customer(from_number)
-            if not customer:
+            if body == "0":
                 reset_to_menu(session)
-                reply = "ما لقيت حساب مرتبط بهذا الرقم.\n\n" + MENU_TEXT
+                reply = MENU_TEXT
             else:
                 customer.phone = body
                 customer.save(update_fields=["phone"])
@@ -294,8 +366,17 @@ class WhatsAppWebhook(APIView):
                 reply = "ما لقيت حساب مرتبط بهذا الرقم.\n\n" + MENU_TEXT
             else:
                 comp = Complaint.objects.create(customer=customer, text=body, status="OPEN")
+
+                try:
+                    email_res = send_complaint_to_staff(customer, comp)
+                    logger.info("complaint email sent complaint_id=%s result=%s", comp.id, email_res)
+                except Exception as e:
+                    logger.exception("complaint email failed complaint_id=%s err=%s", comp.id, e)
+
                 reset_to_menu(session)
-                reply = f"تم تسجيل الشكوى ✅ رقمها: {comp.id}\n\n" + MENU_TEXT
+                reply = f"نأسف لسماع هذا \nتم تسجيل الشكوى ✅ رقمها: {comp.id}\n\n" + MENU_TEXT
+
+
         elif session.state == "GENERAL_QA":
             if body.strip() == "0":
                 reply = MENU_TEXT
@@ -307,6 +388,5 @@ class WhatsAppWebhook(APIView):
             reset_to_menu(session)
             reply = MENU_TEXT
 
-        # سجّل outbound
-        ChatMessage.objects.create(session=session, direction="out", message_type="text", text=reply)
+        ChatMessage.objects.create(session=session, direction="System", message_type="text", text=reply)
         return build_response(request, reply)
